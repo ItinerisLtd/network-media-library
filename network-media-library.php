@@ -609,3 +609,83 @@ add_action( 'pre_post_update', function ( int $post_id ): void {
 
     add_action( "rest_insert_{$post_type}", $callback, 10, 2 );
 } );
+
+/**
+ * Media Library Categories plugin support.
+ */
+foreach (['delete', 'add'] as $action) {
+    add_action("wp_ajax_{$action}-tag", __NAMESPACE__ . '\\wpmlc_attachment_ajax_change_to_media_site', 0);
+}
+add_action('wp_ajax_save-attachment-compat', __NAMESPACE__ . '\\wpmlc_attachment_ajax_change_to_media_site', 0);
+function wpmlc_attachment_ajax_change_to_media_site(): void
+{
+    if (is_media_site()) {
+        return;
+    }
+
+    if (! $GLOBALS['wpmedialibrarycategories'] instanceof wpMediaLibraryCategories) {
+        return;
+    }
+
+    $wpmlc_taxonomy = $GLOBALS['wpmedialibrarycategories']->get_wpmlc_taxonomy();
+    if (empty($wpmlc_taxonomy)) {
+        return;
+    }
+
+    $taxonomy = null;
+    if (! empty($_POST['taxonomy'])) {
+        $taxonomy = sanitize_text_field(wp_unslash($_POST['taxonomy']));
+    } elseif (! empty($_POST['tax_input'])) {
+        $taxonomy = array_key_first($_POST['tax_input']);
+    }
+    if ($taxonomy !== $wpmlc_taxonomy) {
+        return;
+    }
+
+    switch_to_media_site();
+}
+// Switch to media site.
+add_action('pre_get_terms', function (WP_Term_Query $query): void {
+    if (is_media_site()) {
+        return;
+    }
+
+    if (! $GLOBALS['wpmedialibrarycategories'] instanceof wpMediaLibraryCategories) {
+        return;
+    }
+
+    $wpmlc_taxonomy = $GLOBALS['wpmedialibrarycategories']->get_wpmlc_taxonomy();
+    if (empty($wpmlc_taxonomy)) {
+        return;
+    }
+
+    $taxonomy = array_filter((array) $query->query_vars['taxonomy']);
+    if (! in_array($wpmlc_taxonomy, $taxonomy)) {
+        return;
+    }
+
+    switch_to_media_site();
+}, 0);
+// Restore to current blog.
+add_filter('get_terms', function (array $terms, array $taxonomies): array {
+    if (is_media_site()) {
+        return $terms;
+    }
+
+    if (! $GLOBALS['wpmedialibrarycategories'] instanceof wpMediaLibraryCategories) {
+        return $terms;
+    }
+
+    $wpmlc_taxonomy = $GLOBALS['wpmedialibrarycategories']->get_wpmlc_taxonomy();
+    if (empty($wpmlc_taxonomy)) {
+        return $terms;
+    }
+
+    if (! in_array($wpmlc_taxonomy, $taxonomies)) {
+        return $terms;
+    }
+
+    restore_current_blog();
+
+    return $terms;
+}, 10, 2);
