@@ -613,4 +613,4 @@ add_action( 'pre_post_update', function ( int $post_id ): void {
 /**
  * Use the media site for Media Library Categories
  */
-add_filter('wpmediacategory_taxonomy', '\\Network_Media_Library\\switch_to_media_site');
+add_filter('wpmediacategory_taxonomy', '\\Network_Media_Library\\switch_to_media_site', 0);
