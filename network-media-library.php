@@ -611,12 +611,12 @@ add_action( 'pre_post_update', function ( int $post_id ): void {
 } );
 
 /**
- * Use the media site for Media Library Categories plugin.
+ * Media Library Categories plugin support.
  */
-// AJAX calls.
 foreach (['delete', 'add'] as $action) {
     add_action("wp_ajax_{$action}-tag", __NAMESPACE__ . '\\wpmlc_attachment_ajax_change_to_media_site', 0);
 }
+add_action('wp_ajax_save-attachment-compat', __NAMESPACE__ . '\\wpmlc_attachment_ajax_change_to_media_site', 0);
 function wpmlc_attachment_ajax_change_to_media_site(): void
 {
     if (is_media_site()) {
@@ -632,15 +632,19 @@ function wpmlc_attachment_ajax_change_to_media_site(): void
         return;
     }
 
-    $taxonomy = sanitize_text_field(wp_unslash($_POST['taxonomy']));
+    $taxonomy = null;
+    if (! empty($_POST['taxonomy'])) {
+        $taxonomy = sanitize_text_field(wp_unslash($_POST['taxonomy']));
+    } elseif (! empty($_POST['tax_input'])) {
+        $taxonomy = array_key_first($_POST['tax_input']);
+    }
     if ($taxonomy !== $wpmlc_taxonomy) {
         return;
     }
 
     switch_to_media_site();
 }
-
-// Get Terms
+// Switch to media site.
 add_action('pre_get_terms', function (WP_Term_Query $query): void {
     if (is_media_site()) {
         return;
@@ -662,6 +666,7 @@ add_action('pre_get_terms', function (WP_Term_Query $query): void {
 
     switch_to_media_site();
 }, 0);
+// Restore to current blog.
 add_filter('get_terms', function (array $terms, array $taxonomies): array {
     if (is_media_site()) {
         return $terms;
