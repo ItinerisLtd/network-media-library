@@ -639,3 +639,48 @@ function wpmlc_attachment_ajax_change_to_media_site(): void
 
     switch_to_media_site();
 }
+
+// Get Terms
+add_action('pre_get_terms', function (WP_Term_Query $query): void {
+    if (is_media_site()) {
+        return;
+    }
+
+    if (! $GLOBALS['wpmedialibrarycategories'] instanceof wpMediaLibraryCategories) {
+        return;
+    }
+
+    $wpmlc_taxonomy = $GLOBALS['wpmedialibrarycategories']->get_wpmlc_taxonomy();
+    if (empty($wpmlc_taxonomy)) {
+        return;
+    }
+
+    $taxonomy = array_filter((array) $query->query_vars['taxonomy']);
+    if (! in_array($wpmlc_taxonomy, $taxonomy)) {
+        return;
+    }
+
+    switch_to_media_site();
+}, 0);
+add_filter('get_terms', function (array $terms, array $taxonomies): array {
+    if (is_media_site()) {
+        return $terms;
+    }
+
+    if (! $GLOBALS['wpmedialibrarycategories'] instanceof wpMediaLibraryCategories) {
+        return $terms;
+    }
+
+    $wpmlc_taxonomy = $GLOBALS['wpmedialibrarycategories']->get_wpmlc_taxonomy();
+    if (empty($wpmlc_taxonomy)) {
+        return $terms;
+    }
+
+    if (! in_array($wpmlc_taxonomy, $taxonomies)) {
+        return $terms;
+    }
+
+    restore_current_blog();
+
+    return $terms;
+}, 10, 2);
