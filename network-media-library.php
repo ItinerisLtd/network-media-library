@@ -609,3 +609,8 @@ add_action( 'pre_post_update', function ( int $post_id ): void {
 
     add_action( "rest_insert_{$post_type}", $callback, 10, 2 );
 } );
+
+/**
+ * Use the media site for Media Library Categories
+ */
+add_filter('wpmediacategory_taxonomy', '\\Network_Media_Library\\switch_to_media_site');
