@@ -580,3 +580,225 @@ class Post_Thumbnail_Saver {
 }
 
 new Post_Thumbnail_Saver();
+
+/**
+ * Compatibility with the MultilingualPress plugin.
+ *
+ * MultilingualPress copies attachments from the source site to the target site when a
+ * post is translated — featured images, in-content media blocks, and ACF image/file/gallery
+ * fields all funnel through its attachment copier. With a shared network media library that
+ * is both unnecessary and harmful: the copy either fails (the file does not exist on the
+ * sub-site) leaving an empty reference, or it creates a duplicate attachment outside the
+ * central library.
+ *
+ * Because every site already shares one media library, the correct behaviour is for a
+ * translation to reference the *same* attachment IDs as its source. This class hooks
+ * MultilingualPress's public filters to keep those shared IDs instead of duplicating, for
+ * each of the three vectors. It is only instantiated when MultilingualPress is active.
+ */
+class MultilingualPress_Compatibility {
+
+	/**
+	 * The source post content captured before MultilingualPress rewrites media blocks.
+	 *
+	 * @var string|null
+	 */
+	protected $source_content = null;
+
+	/**
+	 * Sets up the necessary filter callbacks against MultilingualPress's hooks.
+	 */
+	public function __construct() {
+		// Featured image: hide MLP's "copy featured image" field (it would duplicate) and
+		// instead inherit the source's shared thumbnail ID.
+		add_filter( 'multilingualpress.translation_ui_show_field', [ $this, 'hide_copy_featured_image_field' ], 10, 2 );
+		add_filter( 'multilingualpress.post_meta_data', [ $this, 'share_featured_image' ], 99, 2 );
+
+		// ACF image/file/gallery fields: undo MLP's duplication, keeping the shared IDs.
+		add_filter( 'multilingualpress.post_meta_data', [ $this, 'share_acf_attachment_fields' ], 99, 2 );
+
+		// In-content media blocks: keep the source content verbatim (shared IDs and URLs)
+		// instead of MLP's per-site rewritten copy.
+		add_filter( 'multilingualpress.content_before_update_remote_post', [ $this, 'capture_source_content' ], 1, 1 );
+		add_filter( 'multilingualpress.content_before_update_remote_post', [ $this, 'keep_source_content' ], 99, 1 );
+
+		// Media modal / attachment edit screen: remove MLP's "Copy to connected site(s)"
+		// panel — copying attachments per-site is meaningless (and harmful) with a shared
+		// library. Removing the fields also disables the copy, which runs on their submission.
+		add_filter( 'attachment_fields_to_edit', [ $this, 'remove_media_library_fields' ], 99 );
+	}
+
+	/**
+	 * Hides MultilingualPress's "copy featured image" field.
+	 *
+	 * The field triggers a per-site attachment copy; with a shared library the featured
+	 * image is inherited by reference instead (see self::share_featured_image()).
+	 *
+	 * @param bool   $enabled Whether the field is shown.
+	 * @param object $field   The MultilingualPress metabox field.
+	 * @return bool Whether the field is shown.
+	 */
+	public function hide_copy_featured_image_field( $enabled, $field ) {
+		if ( is_object( $field ) && method_exists( $field, 'key' ) && 'remote-thumbnail-copy' === $field->key() ) {
+			return false;
+		}
+
+		return $enabled;
+	}
+
+	/**
+	 * Inherits the source post's featured image as a shared reference.
+	 *
+	 * Runs on MultilingualPress's metadata-sync filter (remote-site context). The source
+	 * thumbnail is a central-library attachment that resolves on every site, so the
+	 * translation simply points at the same ID. An existing per-translation featured image
+	 * is left untouched.
+	 *
+	 * @param array  $values  Meta values to sync to the remote post, keyed by meta key.
+	 * @param object $context MultilingualPress relationship context.
+	 * @return array The meta values to sync.
+	 */
+	public function share_featured_image( $values, $context ) {
+		if ( ! is_array( $values ) ) {
+			$values = [];
+		}
+		if ( ! $this->is_post_context( $context ) ) {
+			return $values;
+		}
+
+		$remote_post_id = $context->remotePostId();
+		if ( $remote_post_id && get_post_meta( $remote_post_id, '_thumbnail_id', true ) ) {
+			return $values; // Respect an existing per-translation featured image.
+		}
+
+		switch_to_blog( $context->sourceSiteId() );
+		$thumbnail_id = (int) get_post_meta( $context->sourcePostId(), '_thumbnail_id', true );
+		restore_current_blog();
+
+		if ( $thumbnail_id ) {
+			$values['_thumbnail_id'] = [ $thumbnail_id ];
+		}
+
+		return $values;
+	}
+
+	/**
+	 * Keeps ACF image/file/gallery fields pointing at the shared source attachments.
+	 *
+	 * MultilingualPress's ACF field copier duplicates these attachments and overrides the
+	 * synced value (at priority 10 on the same filter). Running later, this restores the
+	 * verbatim source values for file-type fields only, leaving post-object, relationship,
+	 * and taxonomy fields — which MultilingualPress legitimately remaps to the translated
+	 * objects — untouched.
+	 *
+	 * @param array  $values  Meta values to sync to the remote post, keyed by meta key.
+	 * @param object $context MultilingualPress relationship context.
+	 * @return array The meta values to sync.
+	 */
+	public function share_acf_attachment_fields( $values, $context ) {
+		if ( ! is_array( $values ) || ! $values || ! function_exists( 'acf_get_field' ) ) {
+			return $values;
+		}
+		if ( ! $this->is_post_context( $context ) ) {
+			return $values;
+		}
+
+		$source_post_id   = $context->sourcePostId();
+		$file_field_types = [ 'image', 'file', 'gallery' ];
+
+		switch_to_blog( $context->sourceSiteId() );
+		foreach ( array_keys( $values ) as $key ) {
+			if ( '_' === substr( (string) $key, 0, 1 ) ) {
+				continue; // ACF stores the field-key reference under the underscore-prefixed twin.
+			}
+			$field_key = get_post_meta( $source_post_id, '_' . $key, true );
+			if ( ! is_string( $field_key ) || 0 !== strpos( $field_key, 'field_' ) ) {
+				continue;
+			}
+			$field = acf_get_field( $field_key );
+			if ( ! $field || ! in_array( $field['type'] ?? '', $file_field_types, true ) ) {
+				continue;
+			}
+			// Restore the shared source attachment ID(s) for this field.
+			$values[ $key ] = get_post_meta( $source_post_id, $key, false );
+		}
+		restore_current_blog();
+
+		return $values;
+	}
+
+	/**
+	 * Captures the source post content before MultilingualPress rewrites its media blocks.
+	 *
+	 * @param string $content The source post content.
+	 * @return string The unmodified source post content.
+	 */
+	public function capture_source_content( $content ) {
+		$this->source_content = $content;
+
+		return $content;
+	}
+
+	/**
+	 * Restores the original source content, discarding MultilingualPress's media-block copy.
+	 *
+	 * In-content image/gallery/cover/file/media-text/audio/video blocks reference shared
+	 * attachment IDs and absolute media-site URLs that already resolve on every site, so the
+	 * translation keeps the source markup verbatim rather than the per-site rewritten copy.
+	 *
+	 * @param string $content The (possibly rewritten) post content.
+	 * @return string The original source post content.
+	 */
+	public function keep_source_content( $content ) {
+		return null === $this->source_content ? $content : $this->source_content;
+	}
+
+	/**
+	 * Removes MultilingualPress's "Copy to connected site(s)" panel from the media modal.
+	 *
+	 * The panel lets an editor duplicate an attachment to other sites; with a shared media
+	 * library there is nothing to copy. MultilingualPress adds the panel via
+	 * `multilingualpress-media-library-*` form fields (a heading and the related-sites
+	 * select); removing them hides the panel and, because the copy runs on submission of the
+	 * select, disables the duplication too.
+	 *
+	 * @param array $form_fields The attachment form fields.
+	 * @return array The attachment form fields without MultilingualPress's media fields.
+	 */
+	public function remove_media_library_fields( $form_fields ) {
+		if ( ! is_array( $form_fields ) ) {
+			return $form_fields;
+		}
+
+		foreach ( array_keys( $form_fields ) as $key ) {
+			if ( is_string( $key ) && 0 === strpos( $key, 'multilingualpress-' ) ) {
+				unset( $form_fields[ $key ] );
+			}
+		}
+
+		return $form_fields;
+	}
+
+	/**
+	 * Whether the given relationship context exposes the post accessors we rely on.
+	 *
+	 * @param mixed $context MultilingualPress relationship context.
+	 * @return bool
+	 */
+	protected function is_post_context( $context ) : bool {
+		return is_object( $context )
+			&& method_exists( $context, 'sourcePostId' )
+			&& method_exists( $context, 'sourceSiteId' )
+			&& method_exists( $context, 'remotePostId' );
+	}
+}
+
+add_action(
+	'plugins_loaded',
+	static function () {
+		if ( function_exists( 'Inpsyde\\MultilingualPress\\resolve' ) ) {
+			new MultilingualPress_Compatibility();
+		}
+	},
+	20
+);
