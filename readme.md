@@ -46,6 +46,7 @@ Links to media from other sites mostly work, although there are a couple of edge
 Compatibility with third-party plugins is good, but not guaranteed. The following plugins and libraries are explicitly supported by Network Media Library:
 
 * [Advanced Custom Fields](https://wordpress.org/plugins/advanced-custom-fields/)
+* [MultilingualPress](https://multilingualpress.org/)
 * [Regenerate Thumbnails](https://wordpress.org/plugins/regenerate-thumbnails/)
 * [WP User Avatars](https://wordpress.org/plugins/wp-user-avatars/)
 
