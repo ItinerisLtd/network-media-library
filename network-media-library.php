@@ -589,23 +589,87 @@ new Post_Thumbnail_Saver();
  * @param int $post_id The Post ID.
  */
 add_action( 'pre_post_update', function ( int $post_id ): void {
-    if (! defined( 'REST_REQUEST' ) || ! REST_REQUEST) {
-        return;
-    }
+	if ( ! defined( 'REST_REQUEST' ) || ! REST_REQUEST ) {
+		return;
+	}
 
-    $post_type = get_post_type( $post_id );
-    $callback = static function ( WP_Post $post, WP_REST_Request $request ): void {
-        $featured_media = $request->get_param( 'featured_media' );
-        if (empty( $featured_media )) {
-            return;
-        }
+	$post_type = get_post_type( $post_id );
+	$callback  = static function ( WP_Post $post, WP_REST_Request $request ): void {
+		$featured_media = $request->get_param( 'featured_media' );
+		if ( empty( $featured_media ) ) {
+			return;
+		}
 
-        set_post_thumbnail( $post->ID, $featured_media );
-        update_post_meta( $post->ID, '_thumbnail_id', $featured_media );
+		set_post_thumbnail( $post->ID, $featured_media );
+		update_post_meta( $post->ID, '_thumbnail_id', $featured_media );
 
-        // Prevent REST Controller from breaking the featured media again.
-        unset( $request['featured_media'] );
-    };
+		// Prevent REST Controller from breaking the featured media again.
+		unset( $request['featured_media'] );
+	};
 
-    add_action( "rest_insert_{$post_type}", $callback, 10, 2 );
+	add_action( "rest_insert_{$post_type}", $callback, 10, 2 );
 } );
+
+/**
+ * https://github.com/humanmade/network-media-library/issues/99
+ * Fix wp:site-logo on subsites when using a network media library.
+ *
+ * has_custom_logo() — called by get_custom_logo() — uses wp_attachment_is_image()
+ * which calls get_post() internally. get_post() returns null for cross-site
+ * attachments so the logo is never rendered. The `get_custom_logo` filter fires
+ * even when the output is empty, so we intercept there to build the correct HTML.
+ */
+add_filter(
+	'get_custom_logo',
+	static function ( string $html ): string {
+		if ( '' !== $html ) {
+			return $html;
+		}
+
+		if ( is_media_site() ) {
+			return $html;
+		}
+
+		$logo_id = (int) get_theme_mod( 'custom_logo', get_option( 'site_logo', 0 ) );
+		if ( 0 === $logo_id ) {
+			return $html;
+		}
+
+		switch_to_media_site();
+		$image_alt = (string) get_post_meta( $logo_id, '_wp_attachment_image_alt', true );
+		restore_current_blog();
+
+		$alt = '' !== $image_alt ? $image_alt : get_bloginfo( 'name', 'display' );
+
+		// wp_get_attachment_image_src is already intercepted by Network Media Library.
+		$image = wp_get_attachment_image(
+			$logo_id,
+			'medium',
+			false,
+			[
+				'class'   => 'custom-logo',
+				'loading' => false,
+				'alt'     => $alt,
+			]
+		);
+
+		if ( ! $image ) {
+			return $html;
+		}
+
+		// is_home() is true on the posts index even when it is not the front page; the
+		// page_for_posts check excludes that case so aria-current is only added when the
+		// logo link genuinely points at the current page.
+		$is_current_page = ! is_paged() && ( is_front_page() || ( is_home() && (int) get_option( 'page_for_posts' ) !== get_queried_object_id() ) );
+		$aria_current    = $is_current_page ? ' aria-current="page"' : '';
+
+		return sprintf(
+			'<a href="%1$s" class="custom-logo-link" rel="home"%2$s>%3$s</a>',
+			esc_url( home_url( '/' ) ),
+			$aria_current,
+			$image
+		);
+	},
+	10,
+	1
+);
