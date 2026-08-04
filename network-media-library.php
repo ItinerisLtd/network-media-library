@@ -35,6 +35,7 @@ namespace Network_Media_Library;
 
 use WP_Post;
 use WP_REST_Request;
+use Yoast\WP\SEO\Values\Open_Graph\Images as ImageContainer;
 
 /**
  * Don't call this file directly.
@@ -672,4 +673,54 @@ add_filter(
 	},
 	10,
 	1
+);
+
+/**
+ * Resolve Yoast SEO's default Open Graph image against the media library site.
+ *
+ * On subsites Yoast may store an attachment ID from another site, leaving
+ * og:image empty. Run after the page image and before Yoast's default.
+ *
+ * @param ImageContainer $images Yoast's Open Graph image container.
+ * @return ImageContainer
+ */
+add_filter(
+	'wpseo_add_opengraph_additional_images',
+	static function ( ImageContainer $images ): ImageContainer {
+		if ( $images->has_images() ) {
+			return $images;
+		}
+
+		if ( is_media_site() ) {
+			return $images;
+		}
+
+		$yoast         = YoastSEO();
+		$options       = $yoast->helpers->options;
+		$attachment_id = absint( $options->get( 'og_default_image_id', 0 ) ?? 0 );
+		$stored_url    = (string) $options->get( 'og_default_image', '' );
+
+		if ( empty( $attachment_id ) ) {
+			return $images;
+		}
+
+		switch_to_media_site();
+
+		try {
+			$image = $yoast->helpers->open_graph->image->get_image_by_id( $attachment_id );
+		} finally {
+			restore_current_blog();
+		}
+
+		if ( is_array( $image ) && ! empty( $image['url'] ) ) {
+			$images->add_image( $image );
+			return $images;
+		}
+
+		if ( ! empty( $stored_url ) ) {
+			$images->add_image( $stored_url );
+		}
+
+		return $images;
+	}
 );
