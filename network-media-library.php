@@ -19,7 +19,7 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     0.1.1
+ * Version:     0.1.4
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
@@ -431,6 +431,9 @@ class ACF_Value_Filter {
 			add_filter( "acf/format_value/type={$type}", [ $this, 'set_value' ], 0, 1 );
 			add_filter( "acf/format_value/type={$type}", [ $this, 'filter_acf_attachment_format_value' ], 9999, 3 );
 		}
+
+		add_filter( 'acf/validate_value/type=image', [ $this, 'validate_attachment_is_image' ], 20, 4 );
+		add_filter( 'acf/validate_value/type=gallery', [ $this, 'validate_attachment_is_image' ], 20, 4 );
 	}
 
 	/**
@@ -478,6 +481,36 @@ class ACF_Value_Filter {
 		restore_current_blog();
 
 		return $value;
+	}
+
+	/**
+	 * Re-validates Image and Gallery field attachments against the central media site.
+	 *
+	 * ACF's own validation for these field types checks `wp_attachment_is_image()`
+	 * against the current site, but network-shared attachments only exist as posts
+	 * on the media site, so that check always fails for them here and blocks saving
+	 * the field. Re-run the field type's own validation against the media site
+	 * before accepting ACF's "not a valid image" error.
+	 *
+	 * Only intervenes on that specific error, so unrelated validation failures
+	 * (e.g. from other filters) are left untouched.
+	 *
+	 * @param bool|string $valid The current validity status.
+	 * @param mixed       $value The field value.
+	 * @param array       $field The field array.
+	 * @param string      $input The name of the input in the POST object.
+	 * @return bool|string The validity status.
+	 */
+	public function validate_attachment_is_image( $valid, $value, array $field, string $input ) {
+		if ( is_media_site() || empty( $value ) || __( 'File must be a valid image.', 'acf' ) !== $valid ) {
+			return $valid;
+		}
+
+		switch_to_media_site();
+		$valid = acf_get_field_type( $field['type'] )->validate_value( true, $value, $field, $input );
+		restore_current_blog();
+
+		return $valid;
 	}
 }
 
