@@ -19,14 +19,14 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     0.1.4
+ * Version:     0.1.5
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
  * License URI: ./LICENSE
  * Text Domain: network-media-library
  * Domain Path: /languages
- * Requires PHP: 7.0
+ * Requires PHP: 8.4
  */
 
 declare( strict_types=1 );
@@ -35,6 +35,7 @@ namespace Network_Media_Library;
 
 use WP_Post;
 use WP_REST_Request;
+use Yoast\WP\SEO\Memoizers\Meta_Tags_Context_Memoizer;
 use Yoast\WP\SEO\Values\Open_Graph\Images as ImageContainer;
 
 /**
@@ -709,10 +710,44 @@ add_filter(
 );
 
 /**
- * Resolve Yoast SEO's default Open Graph image against the media library site.
+ * Resolves a Yoast Open Graph image against the media library site.
  *
- * On subsites Yoast may store an attachment ID from another site, leaving
- * og:image empty. Run after the page image and before Yoast's default.
+ * Only handles images stored with an attachment ID: Yoast adds URL-only images itself, so
+ * they never reach the filter with an empty container.
+ *
+ * @param int    $attachment_id The attachment ID, which may belong to the media library site.
+ * @param string $fallback_url  URL Yoast already stored for the same image.
+ * @return array<string, mixed>|null The image array when resolved, the URL alone when the ID is set but
+ *                                   can't be resolved, null when there is no ID or nothing to fall back to.
+ */
+function resolve_open_graph_image( int $attachment_id, string $fallback_url ): ?array {
+	if ( empty( $attachment_id ) ) {
+		return null;
+	}
+
+	switch_to_media_site();
+
+	try {
+		$image = YoastSEO()->helpers->open_graph->image->get_image_by_id( $attachment_id );
+	} finally {
+		restore_current_blog();
+	}
+
+	if ( is_array( $image ) && ! empty( $image['url'] ) ) {
+		return $image;
+	}
+
+	// The stored URL is still the right image, just without dimensions.
+	return empty( $fallback_url ) ? null : [ 'url' => $fallback_url ];
+}
+
+/**
+ * Resolve Yoast SEO's Open Graph image against the media library site.
+ *
+ * Yoast validates og:image attachment IDs on the current site, so a central-library ID is
+ * invalid on a subsite: Open_Graph_Image_Generator returns early after add_image_by_id()
+ * whether or not the image was added, leaving og:image empty. Covers the page's own image
+ * first, then the site-wide default.
  *
  * @param ImageContainer $images Yoast's Open Graph image container.
  * @return ImageContainer
@@ -728,30 +763,21 @@ add_filter(
 			return $images;
 		}
 
-		$yoast         = YoastSEO();
-		$options       = $yoast->helpers->options;
-		$attachment_id = absint( $options->get( 'og_default_image_id', 0 ) ?? 0 );
-		$stored_url    = (string) $options->get( 'og_default_image', '' );
+		$options = YoastSEO()->helpers->options;
 
-		if ( empty( $attachment_id ) ) {
-			return $images;
-		}
+		// The memoizer holds the context Yoast is already rendering, so this is the same indexable.
+		$indexable = YoastSEO()->classes->get( Meta_Tags_Context_Memoizer::class )->for_current_page()->indexable;
 
-		switch_to_media_site();
+		$image = resolve_open_graph_image(
+			absint( $indexable->open_graph_image_id ),
+			(string) $indexable->open_graph_image
+		) ?? resolve_open_graph_image(
+			absint( $options->get( 'og_default_image_id', 0 ) ),
+			(string) $options->get( 'og_default_image', '' )
+		);
 
-		try {
-			$image = $yoast->helpers->open_graph->image->get_image_by_id( $attachment_id );
-		} finally {
-			restore_current_blog();
-		}
-
-		if ( is_array( $image ) && ! empty( $image['url'] ) ) {
+		if ( ! empty( $image ) ) {
 			$images->add_image( $image );
-			return $images;
-		}
-
-		if ( ! empty( $stored_url ) ) {
-			$images->add_image( $stored_url );
 		}
 
 		return $images;
