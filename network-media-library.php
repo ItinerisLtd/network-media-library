@@ -35,6 +35,7 @@ namespace Network_Media_Library;
 
 use WP_Post;
 use WP_REST_Request;
+use Yoast\WP\SEO\Context\Meta_Tags_Context;
 use Yoast\WP\SEO\Memoizers\Meta_Tags_Context_Memoizer;
 use Yoast\WP\SEO\Values\Open_Graph\Images as ImageContainer;
 
@@ -784,4 +785,43 @@ add_filter(
 
 		return $images;
 	}
+);
+
+/**
+ * Build Yoast's schema primary image on the media library site, where its metadata lives.
+ *
+ * @param mixed             $piece   The ImageObject graph piece.
+ * @param Meta_Tags_Context $context The context Yoast is rendering.
+ * @return mixed
+ */
+add_filter(
+	'wpseo_schema_main_image',
+	static function ( $piece, Meta_Tags_Context $context ) {
+		if ( ! is_array( $piece ) || empty( $piece['@id'] ) || is_media_site() ) {
+			return $piece;
+		}
+
+		$attachment_id = absint( $context->main_image_id );
+
+		// Content images only carry an ID on the indexable.
+		if ( empty( $attachment_id ) && 'first-content-image' === $context->indexable->open_graph_image_source ) {
+			$attachment_id = absint( $context->indexable->open_graph_image_id );
+		}
+
+		if ( empty( $attachment_id ) ) {
+			return $piece;
+		}
+
+		switch_to_media_site();
+
+		try {
+			$image = YoastSEO()->helpers->schema->image->generate_from_attachment_id( $piece['@id'], $attachment_id );
+		} finally {
+			restore_current_blog();
+		}
+
+		return empty( $image['url'] ) ? $piece : $image;
+	},
+	10,
+	2
 );
