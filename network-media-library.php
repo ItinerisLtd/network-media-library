@@ -308,7 +308,8 @@ add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP
 
 	foreach ( $media_routes as $route ) {
 		if ( 0 === strpos( $request->get_route(), $route ) ) {
-			$request->set_param( 'post', null );
+			// Drop rather than null the parameter: a null query param reaches urlencode() in the pagination links.
+			unset( $request['post'] );
 			switch_to_media_site();
 			break;
 		}
@@ -404,8 +405,9 @@ function filter_content_tags( $content ) {
 	return $content;
 }
 
-remove_filter( 'the_content', 'wp_filter_content_tags' );
-add_filter( 'the_content', __NAMESPACE__ . '\filter_content_tags' );
+// Core adds this at priority 12 so it runs after do_shortcode(); replace it at the same priority.
+remove_filter( 'the_content', 'wp_filter_content_tags', 12 );
+add_filter( 'the_content', __NAMESPACE__ . '\filter_content_tags', 12 );
 
 /**
  * A class which encapsulates the filtering of ACF field values.
