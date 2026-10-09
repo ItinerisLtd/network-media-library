@@ -2,7 +2,7 @@
 <ruleset name="Network_Media_Library">
 
 	<config name="installed_paths" value="../../wp-coding-standards/wpcs,../../phpcompatibility/php-compatibility,../../automattic/phpcs-neutron-standard" />
-	<config name="testVersion" value="7.0-"/>
+	<config name="testVersion" value="8.4-"/>
 
 	<exclude-pattern>*/vendor/*</exclude-pattern>
 	<exclude-pattern>*/node_modules/*</exclude-pattern>
