@@ -19,13 +19,14 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     0.1.5
+ * Version:     0.1.6
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
  * License URI: ./LICENSE
  * Text Domain: network-media-library
  * Domain Path: /languages
+ * Requires at least: 7.1
  * Requires PHP: 8.4
  */
 
@@ -286,6 +287,88 @@ add_filter( 'wp_prepare_attachment_for_js', function( array $response, \WP_Post 
 }, 0, 3 );
 
 /**
+ * Removes the media list table's delete actions on sites other than the network media library site.
+ *
+ * Like the modal's delete nonce above, these links run on the local site, where the attachment ID
+ * can belong to an unrelated post that would be deleted instead.
+ *
+ * @param string[] $actions Row or bulk actions.
+ * @return string[] Updated actions.
+ */
+function remove_delete_actions( array $actions ) : array {
+	if ( is_media_site() ) {
+		return $actions;
+	}
+
+	unset( $actions['delete'], $actions['trash'], $actions['untrash'] );
+
+	return $actions;
+}
+add_filter( 'media_row_actions', __NAMESPACE__ . '\remove_delete_actions', 0 );
+add_filter( 'bulk_actions-upload', __NAMESPACE__ . '\remove_delete_actions', 0 );
+
+/**
+ * Refuses those delete requests too, as a stale or crafted page can still submit them.
+ */
+add_action( 'load-upload.php', function() {
+	if ( is_media_site() ) {
+		return;
+	}
+
+	// Mirrors WP_Media_List_Table::current_action().
+	// phpcs:disable WordPress.Security.NonceVerification.Recommended -- refusing, not processing.
+	$action = $_REQUEST['action'] ?? '';
+	if ( isset( $_REQUEST['media'] ) && ( isset( $_REQUEST['found_post_id'] ) || isset( $_REQUEST['parent_post_id'] ) ) ) {
+		$action = '';
+	} elseif ( isset( $_REQUEST['delete_all'] ) || isset( $_REQUEST['delete_all2'] ) ) {
+		$action = 'delete_all';
+	} elseif ( ! empty( $_REQUEST['filter_action'] ) ) {
+		$action = '';
+	}
+	// phpcs:enable
+
+	if ( in_array( $action, [ 'trash', 'untrash', 'delete', 'delete_all' ], true ) ) {
+		wp_die( esc_html__( 'Media can only be deleted from the network media library site.', 'network-media-library' ), 403 );
+	}
+} );
+
+/**
+ * Support for the WP Media Folder plugin. Its right-click Delete deletes by ID on the local site,
+ * so it is hidden and refused on sites other than the network media library site; Replace and
+ * uploads are handled below.
+ */
+function hide_wpmf_delete() : void {
+	static $added = false;
+
+	if ( $added || is_media_site() ) {
+		return;
+	}
+
+	$added = wp_add_inline_style( 'wpmf-style', 'li:has(> .material_deletefile) { display: none; }' );
+}
+// WPMF enqueues its style on wp_enqueue_media, which can fire after admin_enqueue_scripts or outside wp-admin.
+add_action( 'admin_enqueue_scripts', __NAMESPACE__ . '\hide_wpmf_delete', 99 );
+add_action( 'wp_enqueue_media', __NAMESPACE__ . '\hide_wpmf_delete', 99 );
+add_action( 'wp_ajax_wpmf', function() {
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- refusing, not processing.
+	if ( ! is_media_site() && isset( $_REQUEST['task'] ) && 'delete_file' === $_REQUEST['task'] ) {
+		wp_send_json_error( null, 403 );
+	}
+}, 0 );
+
+// WPMF Replace overwrites the file under every site's pages, so it stays on the media library site.
+add_filter( 'pre_option_wpmf_option_override', function( $value ) {
+	return is_media_site() ? $value : '0';
+} );
+
+// WPMF greys out uploads on subsites, but NML stores them in the central library.
+add_action( 'admin_init', function() {
+	if ( isset( $GLOBALS['wp_media_folder'] ) ) {
+		remove_action( 'admin_head', [ $GLOBALS['wp_media_folder'], 'disableAddMediaFileButton' ] );
+	}
+} );
+
+/**
  * Filters the pre-dispatch value of REST API requests in order to switch to the network media library site when querying media.
  *
  * @param mixed           $result  Response to replace the requested version with. Can be anything
@@ -305,6 +388,8 @@ add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP
 	$media_routes = [
 		'/wp/v2/media',
 		'/regenerate-thumbnails/',
+		// Crop Thumbnails plugin; its settings routes stay per site.
+		'/crop_thumbnails/v1/crop',
 	];
 
 	foreach ( $media_routes as $route ) {
@@ -312,12 +397,35 @@ add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP
 			// Drop rather than null the parameter: a null query param reaches urlencode() in the pagination links.
 			unset( $request['post'] );
 			switch_to_media_site();
+
+			if ( '/crop_thumbnails/v1/crop' === $route ) {
+				add_filter( 'pre_option_crop-post-thumbs', __NAMESPACE__ . '\keep_crop_thumbnails_settings' );
+			}
 			break;
 		}
 	}
 
 	return $result;
 }, 0, 3 );
+
+/**
+ * Keeps the Crop Thumbnails settings per site while its crop route runs on the media library site.
+ *
+ * Added by the REST dispatch filter above for that route only.
+ *
+ * @param mixed $pre The value to return instead of the option value.
+ * @return mixed The requesting site's settings, or `$pre` when not switched away from it.
+ */
+function keep_crop_thumbnails_settings( $pre ) {
+	$site_id = (int) $GLOBALS['current_blog']->blog_id;
+
+	if ( get_current_blog_id() === $site_id ) {
+		return $pre;
+	}
+
+	// An empty array rather than false, so a site without settings doesn't fall through to the media site's.
+	return get_blog_option( $site_id, 'crop-post-thumbs', [] );
+}
 
 /**
  * Fires after the XML-RPC user has been authenticated, but before the rest of the method logic begins, in order to
