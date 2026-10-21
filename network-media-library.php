@@ -19,14 +19,14 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     0.1.4
+ * Version:     0.1.5
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
  * License URI: ./LICENSE
  * Text Domain: network-media-library
  * Domain Path: /languages
- * Requires PHP: 7.0
+ * Requires PHP: 8.4
  */
 
 declare( strict_types=1 );
@@ -35,6 +35,8 @@ namespace Network_Media_Library;
 
 use WP_Post;
 use WP_REST_Request;
+use Yoast\WP\SEO\Context\Meta_Tags_Context;
+use Yoast\WP\SEO\Memoizers\Meta_Tags_Context_Memoizer;
 use Yoast\WP\SEO\Values\Open_Graph\Images as ImageContainer;
 
 /**
@@ -307,7 +309,8 @@ add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP
 
 	foreach ( $media_routes as $route ) {
 		if ( 0 === strpos( $request->get_route(), $route ) ) {
-			$request->set_param( 'post', null );
+			// Drop rather than null the parameter: a null query param reaches urlencode() in the pagination links.
+			unset( $request['post'] );
 			switch_to_media_site();
 			break;
 		}
@@ -403,8 +406,9 @@ function filter_content_tags( $content ) {
 	return $content;
 }
 
-remove_filter( 'the_content', 'wp_filter_content_tags' );
-add_filter( 'the_content', __NAMESPACE__ . '\filter_content_tags' );
+// Core adds this at priority 12 so it runs after do_shortcode(); replace it at the same priority.
+remove_filter( 'the_content', 'wp_filter_content_tags', 12 );
+add_filter( 'the_content', __NAMESPACE__ . '\filter_content_tags', 12 );
 
 /**
  * A class which encapsulates the filtering of ACF field values.
@@ -709,10 +713,44 @@ add_filter(
 );
 
 /**
- * Resolve Yoast SEO's default Open Graph image against the media library site.
+ * Resolves a Yoast Open Graph image against the media library site.
  *
- * On subsites Yoast may store an attachment ID from another site, leaving
- * og:image empty. Run after the page image and before Yoast's default.
+ * Only handles images stored with an attachment ID: Yoast adds URL-only images itself, so
+ * they never reach the filter with an empty container.
+ *
+ * @param int    $attachment_id The attachment ID, which may belong to the media library site.
+ * @param string $fallback_url  URL Yoast already stored for the same image.
+ * @return array<string, mixed>|null The image array when resolved, the URL alone when the ID is set but
+ *                                   can't be resolved, null when there is no ID or nothing to fall back to.
+ */
+function resolve_open_graph_image( int $attachment_id, string $fallback_url ): ?array {
+	if ( empty( $attachment_id ) ) {
+		return null;
+	}
+
+	switch_to_media_site();
+
+	try {
+		$image = YoastSEO()->helpers->open_graph->image->get_image_by_id( $attachment_id );
+	} finally {
+		restore_current_blog();
+	}
+
+	if ( is_array( $image ) && ! empty( $image['url'] ) ) {
+		return $image;
+	}
+
+	// The stored URL is still the right image, just without dimensions.
+	return empty( $fallback_url ) ? null : [ 'url' => $fallback_url ];
+}
+
+/**
+ * Resolve Yoast SEO's Open Graph image against the media library site.
+ *
+ * Yoast validates og:image attachment IDs on the current site, so a central-library ID is
+ * invalid on a subsite: Open_Graph_Image_Generator returns early after add_image_by_id()
+ * whether or not the image was added, leaving og:image empty. Covers the page's own image
+ * first, then the site-wide default.
  *
  * @param ImageContainer $images Yoast's Open Graph image container.
  * @return ImageContainer
@@ -728,32 +766,62 @@ add_filter(
 			return $images;
 		}
 
-		$yoast         = YoastSEO();
-		$options       = $yoast->helpers->options;
-		$attachment_id = absint( $options->get( 'og_default_image_id', 0 ) ?? 0 );
-		$stored_url    = (string) $options->get( 'og_default_image', '' );
+		$options = YoastSEO()->helpers->options;
+
+		// The memoizer holds the context Yoast is already rendering, so this is the same indexable.
+		$indexable = YoastSEO()->classes->get( Meta_Tags_Context_Memoizer::class )->for_current_page()->indexable;
+
+		$image = resolve_open_graph_image(
+			absint( $indexable->open_graph_image_id ),
+			(string) $indexable->open_graph_image
+		) ?? resolve_open_graph_image(
+			absint( $options->get( 'og_default_image_id', 0 ) ),
+			(string) $options->get( 'og_default_image', '' )
+		);
+
+		if ( ! empty( $image ) ) {
+			$images->add_image( $image );
+		}
+
+		return $images;
+	}
+);
+
+/**
+ * Build Yoast's schema primary image on the media library site, where its metadata lives.
+ *
+ * @param mixed             $piece   The ImageObject graph piece.
+ * @param Meta_Tags_Context $context The context Yoast is rendering.
+ * @return mixed
+ */
+add_filter(
+	'wpseo_schema_main_image',
+	static function ( $piece, Meta_Tags_Context $context ) {
+		if ( ! is_array( $piece ) || empty( $piece['@id'] ) || is_media_site() ) {
+			return $piece;
+		}
+
+		$attachment_id = absint( $context->main_image_id );
+
+		// Content images only carry an ID on the indexable.
+		if ( empty( $attachment_id ) && 'first-content-image' === $context->indexable->open_graph_image_source ) {
+			$attachment_id = absint( $context->indexable->open_graph_image_id );
+		}
 
 		if ( empty( $attachment_id ) ) {
-			return $images;
+			return $piece;
 		}
 
 		switch_to_media_site();
 
 		try {
-			$image = $yoast->helpers->open_graph->image->get_image_by_id( $attachment_id );
+			$image = YoastSEO()->helpers->schema->image->generate_from_attachment_id( $piece['@id'], $attachment_id );
 		} finally {
 			restore_current_blog();
 		}
 
-		if ( is_array( $image ) && ! empty( $image['url'] ) ) {
-			$images->add_image( $image );
-			return $images;
-		}
-
-		if ( ! empty( $stored_url ) ) {
-			$images->add_image( $stored_url );
-		}
-
-		return $images;
-	}
+		return empty( $image['url'] ) ? $piece : $image;
+	},
+	10,
+	2
 );
