@@ -363,7 +363,7 @@ add_filter( 'pre_option_wpmf_option_override', function( $value ) {
 
 // WPMF greys out uploads on subsites, but NML stores them in the central library.
 add_action( 'admin_init', function() {
-	if ( isset( $GLOBALS['wp_media_folder'] ) ) {
+	if ( ! is_media_site() && isset( $GLOBALS['wp_media_folder'] ) ) {
 		remove_action( 'admin_head', [ $GLOBALS['wp_media_folder'], 'disableAddMediaFileButton' ] );
 	}
 } );
