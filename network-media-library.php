@@ -19,7 +19,7 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     0.1.6
+ * Version:     0.1.7
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
@@ -367,6 +367,87 @@ add_action( 'admin_init', function() {
 		remove_action( 'admin_head', [ $GLOBALS['wp_media_folder'], 'disableAddMediaFileButton' ] );
 	}
 } );
+
+/**
+ * Support for ThreeWP Broadcast. It copies a featured image into the receiving site's own library, which NML never
+ * reads, so each copy keeps the original's featured image from the media library site instead.
+ *
+ * @link https://broadcast.plainviewplugins.com/snippet/network-media-library-fixing-broken-thumbnails/
+ */
+add_action( 'threewp_broadcast_broadcasting_setup', function( $action ) {
+	$bcd          = $action->broadcasting_data;
+	$thumbnail_id = (int) get_post_meta( $bcd->post->ID, '_thumbnail_id', true );
+
+	if ( $thumbnail_id < 1 ) {
+		return;
+	}
+
+	switch_to_media_site();
+	$is_library_image = ( 'attachment' === get_post_type( $thumbnail_id ) );
+	restore_current_blog();
+
+	if ( $is_library_image ) {
+		$bcd->network_media_library_thumbnail_id = $thumbnail_id;
+	}
+} );
+
+add_action( 'threewp_broadcast_broadcasting_before_restore_current_blog', function( $action ) {
+	$bcd = $action->broadcasting_data;
+
+	// Broadcast sends no featured image when "Custom fields" is unchecked.
+	if ( empty( $bcd->network_media_library_thumbnail_id ) || empty( $bcd->custom_fields ) ) {
+		return;
+	}
+
+	// Same blacklist/whitelist check Broadcast runs before it copies the featured image.
+	$fields = $bcd->custom_fields();
+	if ( $fields->blacklist_has( '_thumbnail_id' ) && ! $fields->whitelist_has( '_thumbnail_id' ) ) {
+		return;
+	}
+
+	// Broadcast's custom field protectlist: keep a featured image the copy already has.
+	$copy_id = $bcd->new_post( 'ID' );
+	if ( $fields->protectlist_has( '_thumbnail_id' ) && get_post_meta( $copy_id, '_thumbnail_id', true ) ) {
+		return;
+	}
+
+	update_post_meta( $copy_id, '_thumbnail_id', $bcd->network_media_library_thumbnail_id );
+} );
+
+/**
+ * Whether ThreeWP Broadcast is broadcasting a post right now.
+ */
+function is_broadcasting() : bool {
+	return function_exists( 'ThreeWP_Broadcast' ) && ThreeWP_Broadcast()->is_broadcasting();
+}
+
+// "Keep attachments" unchecked: Broadcast deletes a copy's old images by ID, but under NML those are shared library IDs.
+add_filter( 'pre_delete_attachment', function( $delete ) {
+	return is_broadcasting() ? false : $delete;
+} );
+
+// With MEDIA_TRASH on, that delete trashes the image instead, before `pre_delete_attachment` runs.
+add_filter( 'pre_trash_post', function( $trash, $post ) {
+	return 'attachment' === $post->post_type && is_broadcasting() ? false : $trash;
+}, 10, 2 );
+
+/**
+ * Explains on Broadcast's admin page that "Keep attachments" unchecked deletes nothing (see the filters above).
+ */
+function broadcast_settings_notice() : void {
+	$screen = get_current_screen();
+
+	if ( ! $screen || ! str_starts_with( $screen->id, 'toplevel_page_threewp-broadcast' ) ) {
+		return;
+	}
+
+	printf(
+		'<div class="notice notice-info"><p>%s</p></div>',
+		esc_html__( 'Network Media Library: all sites share one media library, so Broadcast never deletes images while it broadcasts, even with "Keep attachments" unchecked. To delete an image, use the Media Library on the media library site.', 'network-media-library' )
+	);
+}
+add_action( 'admin_notices', __NAMESPACE__ . '\broadcast_settings_notice' );
+add_action( 'network_admin_notices', __NAMESPACE__ . '\broadcast_settings_notice' );
 
 /**
  * Filters the pre-dispatch value of REST API requests in order to switch to the network media library site when querying media.
